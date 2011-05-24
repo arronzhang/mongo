@@ -1191,6 +1191,7 @@ namespace mongo {
         }
 
         virtual void addSpecific( const KeyNode& node , double d, bool newDoc ) {
+            if( ! newDoc ) return;
 
             GEODEBUG( "\t\t" << GeoHash( node.key.firstElement() ) << "\t" << node.recordLoc.obj() << "\t" << d );
 
