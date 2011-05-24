@@ -2104,13 +2104,14 @@ namespace mongo {
             return approxInside;
         }
 
-        Box _want;
-        double _wantLen;
+	Box _want;
+	double _wantLen;
         double _fudge;
 
         GeoHash _start;
 
     };
+
 
     class GeoPolygonBrowse : public GeoBrowse {
     public:
@@ -2459,5 +2460,189 @@ namespace mongo {
         }
 
     } geoWalkCmd;
+
+    class ClusterBox : public Box {
+    public:
+        ClusterBox( Point min , Point max ): Box(min, max), count(0) {
+	}
+        ClusterBox() {}
+        void addPoint(Point poi, BSONObj obj) {
+		if (count == 0) {
+			_centerx = poi._x;
+			_centery = poi._y;
+			_o = obj;
+		}else{
+			_centerx = (poi._x + _centerx) / 2;
+			_centery = (poi._y + _centerx) / 2;
+		}
+		count++;
+        }
+
+	Point center(){
+		return Point(_centerx, _centery);
+	}
+
+        BSONObj obj() {
+		BSONObjBuilder b;
+		BSONArrayBuilder arr;
+		BSONArrayBuilder min;
+		BSONArrayBuilder max;
+		BSONArrayBuilder cen;
+		BSONArrayBuilder markers;
+		min.append(_min._x);
+		min.append(_min._y);
+		max.append(_max._x);
+		max.append(_max._y);
+
+		arr.append(min.arr());
+		arr.append(max.arr());
+
+		b.append( "bounds" , arr.arr() );
+		b.appendNumber( "count" , count );
+		cen.append(_centerx);
+		cen.append(_centery);
+		b.append( "center" , cen.arr() );
+		if(count > 0) markers.append(_o);
+		b.append( "markers" , markers.arr() );
+		return b.obj();
+	}
+
+	long long  count;
+	BSONObj _o;
+	double _centerx;
+	double _centery;
+    };
+
+    class GeoClusterBrowse : public GeoBoxBrowse {
+    public:
+        GeoClusterBrowse( const Geo2dType * g , const BSONObj& box , BSONObj filter = BSONObj() ): GeoBoxBrowse( g , box , filter ), _lenx(8), _leny(6){
+		_px = (_want._max._x - _want._min._x)/_lenx;
+		_py = (_want._max._y - _want._min._y)/_leny;
+		for ( int j = 0; j < _leny; j++ ) {
+			for ( int i = 0; i < _lenx; i++ ) {
+				Point _min(_want._min._x + i*_px, _want._min._y + j*_py);
+				Point _max((i+1) == _lenx ? _want._max._x : (_want._min._x + (i+1)*_px), (j+1) == _leny ? _want._max._y : (_want._min._y + (j+1)*_py));
+				_clusters[i*j+j] = ClusterBox(_min, _max);
+			}
+		}
+	}
+	Box box() {
+		return _want;
+        }
+	//map<int, ClusterBox> clusters{
+	//	return _clusters;
+	//}
+        void curToCluster() {
+		// Do exact check
+		vector< BSONObj > locs;
+                _g->getKeys( currLoc().obj(), locs );
+                for( vector< BSONObj >::iterator i = locs.begin(); i != locs.end(); ++i ) {
+			Point poi( *i );
+			if( _want.inside( poi ) ) {
+				int x = (poi._x - _want._min._x)/_px;
+				int y = (poi._y - _want._min._y)/_py;
+				if (x > (_lenx - 1)) x = _lenx - 1;
+				if (y > (_leny - 1)) y = _leny - 1;
+				//log() << "Found point: " << poi << " grid: " << (x*y+y) << endl;
+				_clusters[x*y+y].addPoint(poi, current());
+			}
+                }
+        }
+	double _px;
+	double _py;
+	int _lenx;
+	int _leny;
+        map<int, ClusterBox> _clusters;
+    };
+    /**
+     * 	box: [[],[]]
+     * 	piece: [5, 5]
+     * 	cluster: true
+     *
+     * results:
+     * [{bounds: [[],[]], count: 2, markers: []}]
+     *
+     */
+
+    class Geo2dClusterCmd : public Command {
+    public:
+        Geo2dClusterCmd() : Command( "geoCluster" ) {}
+        virtual LockType locktype() const { return READ; }
+        bool slaveOk() const { return true; }
+        void help(stringstream& h) const { h << "http://www.mongodb.org/display/DOCS/Geospatial+Indexing#GeospatialIndexing-geoNearCommand"; }
+        bool slaveOverrideOk() { return true; }
+        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            string ns = dbname + "." + cmdObj.firstElement().valuestr();
+
+            Timer t;
+
+            NamespaceDetails * d = nsdetails( ns.c_str() );
+            if ( ! d ) {
+                errmsg = "can't find ns";
+                return false;
+            }
+
+            vector<int> idxs;
+            d->findIndexByType( GEO2DNAME , idxs );
+
+            //if ( idxs.size() > 1 ) {
+            //    errmsg = "more than 1 geo indexes :(";
+            //    return false;
+            //}
+
+            if ( idxs.size() == 0 ) {
+                errmsg = "no geo index :(";
+                return false;
+            }
+
+            int geoIdx = idxs[0];
+
+            result.append( "ns" , ns );
+
+            IndexDetails& id = d->idx( geoIdx );
+            Geo2dType * g = (Geo2dType*)id.getSpec().getType();
+            assert( &id == g->getDetails() );
+
+	    uassert( 14051 , "'box' has to take an object or array" , cmdObj["box"].isABSONObj() );
+	    BSONObj filter;
+	    if ( cmdObj["query"].type() == Object )
+                filter = cmdObj["query"].embeddedObject();
+
+            //shared_ptr<Cursor> cursor( new GeoClusterBrowse( g , cmdObj["box"].embeddedObjectUserCheck() , filter ) );
+            scoped_ptr<GeoClusterBrowse> cursor (new GeoClusterBrowse( g , cmdObj["box"].embeddedObjectUserCheck() , filter ));
+
+            //BSONObjBuilder arr( result.subarrayStart( "results" ) );
+            BSONArrayBuilder arr( result.subarrayStart( "results" ) );
+	    BSONObj current;
+	    //log() << "isNew " << newDoc << endl;
+            while ( cursor->ok() ) {
+		    current = cursor->current();
+		    cursor->curToCluster();
+		    cursor->advance();
+		    //RARELY killCurrentOp.checkForInterrupt();
+	    }
+	    map<int, ClusterBox> clusters = cursor->_clusters;
+	    for ( map<int, ClusterBox>::iterator i = clusters.begin(); i != clusters.end(); i++ ) { 
+		    ClusterBox box = i->second;
+		    if(box.count > 0){
+			    arr.append(box.obj());
+		    }
+	    }
+            arr.done();
+
+            BSONObjBuilder stats( result.subobjStart( "stats" ) );
+	    //stats.append( "time" , cc().curop()->elapsedMillis() );
+	    stats.appendNumber( "timems" , t.millis() );
+            //stats.appendNumber( "btreelocs" , gs._nscanned );
+            stats.appendNumber( "nscanned" , cursor->nscanned() );
+            //stats.appendNumber( "objectsLoaded" , gs._hopper->_objectsLoaded );
+            //stats.append( "avgDistance" , totalDistance / x );
+            //stats.append( "maxDistance" , gs._hopper->farthest() );
+            //stats.done();
+            return true;
+        }
+
+    } geo2dClusterCmd;
+
 
 }
