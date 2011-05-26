@@ -2523,7 +2523,8 @@ namespace mongo {
 			for ( int i = 0; i < _lenx; i++ ) {
 				Point _min(_want._min._x + i*_px, _want._min._y + j*_py);
 				Point _max((i+1) == _lenx ? _want._max._x : (_want._min._x + (i+1)*_px), (j+1) == _leny ? _want._max._y : (_want._min._y + (j+1)*_py));
-				_clusters[i*j+j] = ClusterBox(_min, _max);
+				_clusters[_lenx*j+i] = ClusterBox(_min, _max);
+				//log() << "Create clusterBox:" << (_lenx*j+i) << " min:" << _min << " max:" << _max << endl;
 			}
 		}
 	}
@@ -2545,7 +2546,7 @@ namespace mongo {
 				if (x > (_lenx - 1)) x = _lenx - 1;
 				if (y > (_leny - 1)) y = _leny - 1;
 				//log() << "Found point: " << poi << " grid: " << (x*y+y) << endl;
-				_clusters[x*y+y].addPoint(poi, current());
+				_clusters[_lenx*y+x].addPoint(poi, current());
 			}
                 }
         }
