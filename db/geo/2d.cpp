@@ -1137,18 +1137,20 @@ namespace mongo {
             vector< BSONObj > locs;
             _g->getKeys( node.recordLoc.obj(), locs );
 
-            double maxDistance = -1;
+            //double maxDistance = -1;
 
             // Find the particular location we want
             BSONObj loc;
             GeoHash keyHash( node.key.firstElement(), _g->_bits );
-            for( vector< BSONObj >::iterator i = locs.begin(); i != locs.end(); ++i ) {
+	    bool eWithin = false;
+            double minDistance = -1;
+	    for( vector< BSONObj >::iterator i = locs.begin(); i != locs.end(); ++i ) {
 
                 loc = *i;
 
                 // Ignore all locations not hashed to the key's hash, since we may see
                 // those later
-                if( _g->_hash( loc ) != keyHash ) continue;
+                //if( _g->_hash( loc ) != keyHash ) continue;
 
                 double exactDistance = -1;
                 bool exactWithin = false;
@@ -1170,14 +1172,18 @@ namespace mongo {
                 if( !exactWithin ) continue;
 
                 GEODEBUG( "Inserting exact point: " << GeoPoint( node , exactDistance, exactWithin ) );
-
-                // Add a point for this location
-                _points.insert( GeoPoint( node , exactDistance, exactWithin ) );
-
-                if( exactDistance > maxDistance ) maxDistance = exactDistance;
+		if( minDistance < 0 || minDistance > exactDistance ) {
+			minDistance = exactDistance;
+			eWithin = exactWithin;
+		}
+                //if( exactDistance > maxDistance ) maxDistance = exactDistance;
             }
+                // Add a point for this location
+	    if( minDistance >= 0 )
+		    _points.insert( GeoPoint( node , minDistance, eWithin ) );
 
-            return maxDistance;
+            return minDistance;
+            //return maxDistance;
 
         }
 
@@ -1340,7 +1346,7 @@ namespace mongo {
 
             GeoHopper * hopper = _hopper.get();
 
-            _prefix = _start;
+	    _prefix = _start;
 
             BtreeLocation min,max;
             {
@@ -1353,7 +1359,7 @@ namespace mongo {
                 while ( !_prefix.constrains() || // if next pass would cover universe, just keep going
                         ( _hopper->found() < _numWanted && _spec->sizeEdge( _prefix ) <= _scanDistance)) {
                     GEODEBUG( _prefix << "\t" << _found << "\t DESC" );
-                    while ( min.hasPrefix(_prefix) && min.checkCur(_found, hopper) && min.advance(-1, _found, NULL) )
+		    while ( min.hasPrefix(_prefix) && min.checkCur(_found, hopper) && min.advance(-1, _found, NULL) )
                         _nscanned++;
                     GEODEBUG( _prefix << "\t" << _found << "\t ASC" );
                     while ( max.hasPrefix(_prefix) && max.checkCur(_found, hopper) && max.advance(+1, _found, NULL) )
