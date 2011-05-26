@@ -2474,7 +2474,7 @@ namespace mongo {
 			_o = obj;
 		}else{
 			_centerx = (poi._x + _centerx) / 2;
-			_centery = (poi._y + _centerx) / 2;
+			_centery = (poi._y + _centery) / 2;
 		}
 		count++;
         }
