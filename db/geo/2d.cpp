@@ -2467,23 +2467,86 @@ namespace mongo {
         }
 
     } geoWalkCmd;
+    class Box2 : public Box {
+    public:
+	    Box2( Point min , Point max ): Box(min, max) {
+	    }
+	    Box2(){}
+	    void extend( Point poi ){
+		    if ( poi._x < _min._x ){
+			    _min = Point(poi._x, _min._y);
+		    } else if (poi._x > _max._x ){
+			    _max = Point(poi._x, _max._y);
+		    }
+		    if ( poi._y < _min._y ){
+			    _min = Point(_min._x, poi._y);
+		    } else if (poi._y > _max._y ){
+			    _max = Point(_max._x, poi._y);
+		    }
+	    }
+    };
+
+    class GeoMarker {
+    public:
+	    GeoMarker( Point poi , BSONObj obj ): _poi(poi), _obj(obj) {
+	    }
+	    GeoMarker() {}
+	    Point _poi;
+	    BSONObj _obj;
+    };
+
+
+    const double MinLat = -85.05112878;
+    const double MaxLat = 85.05112878;
+    const double MinLng = -180;
+    const double MaxLng = 180;
+
+    inline Point point_to_projection( const Point& poi ) {
+	    double x = poi._x;
+	    double y = poi._y;
+	    x = min(max(MinLng, x), MaxLng);
+	    y = min(max(MinLat, y), MaxLat);
+	     
+	    x = ( poi._x + 180 ) / 360;
+	    y = sin(y * M_PI / 180);
+	    y = 0.5 - ::log((1+y)/(1-y)) / (4 * M_PI);
+	    return Point(x, y);
+    }
+
+    inline Point projection_to_point( const Point& poi ) {
+	    double x = poi._x;
+	    double y = poi._y;
+	    x = ( x - 0.5 ) * 360;
+	    y = 90 - 360 * atan(exp((y - 0.5) * 2 * M_PI)) / M_PI;
+	    return Point(x, y);
+    }
+
 
     class ClusterBox : public Box {
     public:
-        ClusterBox( Point min , Point max ): Box(min, max), count(0) {
+        ClusterBox( Point min , Point max , double extendDisance ): Box(min, max), count(0), _extendDisance( extendDisance ) {
 	}
         ClusterBox() {}
-        void addPoint(Point poi, BSONObj obj) {
+        void addPoint(Point poi, GeoMarker marker) {
 		if (count == 0) {
+			_bounds = Box2(poi, poi);
 			_centerx = poi._x;
 			_centery = poi._y;
-			_o = obj;
+			_marker = marker;
 		}else{
-			_centerx = (poi._x + _centerx) / 2;
-			_centery = (poi._y + _centery) / 2;
+			_bounds.extend(poi);
+			_centerx = (poi._x + _centerx * count) / (count + 1);
+			_centery = (poi._y + _centery * count) / (count + 1);
 		}
+		refreshBounds();
 		count++;
         }
+
+	void refreshBounds(){
+		Point cen = point_to_projection( center() );
+		_min = projection_to_point(Point(cen._x - _extendDisance, cen._y + _extendDisance));
+		_max = projection_to_point(Point(cen._x + _extendDisance, cen._y - _extendDisance));
+	}
 
 	Point center(){
 		return Point(_centerx, _centery);
@@ -2495,11 +2558,10 @@ namespace mongo {
 		BSONArrayBuilder min;
 		BSONArrayBuilder max;
 		BSONArrayBuilder cen;
-		BSONArrayBuilder markers;
-		min.append(_min._x);
-		min.append(_min._y);
-		max.append(_max._x);
-		max.append(_max._y);
+		min.append(_bounds._min._x);
+		min.append(_bounds._min._y);
+		max.append(_bounds._max._x);
+		max.append(_bounds._max._y);
 
 		arr.append(min.arr());
 		arr.append(max.arr());
@@ -2509,37 +2571,29 @@ namespace mongo {
 		cen.append(_centerx);
 		cen.append(_centery);
 		b.append( "center" , cen.arr() );
-		if(count > 0) markers.append(_o);
-		b.append( "markers" , markers.arr() );
 		return b.obj();
 	}
 
 	long long  count;
-	BSONObj _o;
+	GeoMarker _marker;
+	Box2 _bounds;
+	double _extendDisance;
 	double _centerx;
 	double _centery;
     };
 
     class GeoClusterBrowse : public GeoBoxBrowse {
     public:
-        GeoClusterBrowse( const Geo2dType * g , const BSONObj& box , BSONObj filter = BSONObj() ): GeoBoxBrowse( g , box , filter ), _lenx(8), _leny(6){
-		_px = (_want._max._x - _want._min._x)/_lenx;
-		_py = (_want._max._y - _want._min._y)/_leny;
-		for ( int j = 0; j < _leny; j++ ) {
-			for ( int i = 0; i < _lenx; i++ ) {
-				Point _min(_want._min._x + i*_px, _want._min._y + j*_py);
-				Point _max((i+1) == _lenx ? _want._max._x : (_want._min._x + (i+1)*_px), (j+1) == _leny ? _want._max._y : (_want._min._y + (j+1)*_py));
-				_clusters[_lenx*j+i] = ClusterBox(_min, _max);
-				//log() << "Create clusterBox:" << (_lenx*j+i) << " min:" << _min << " max:" << _max << endl;
-			}
-		}
+        GeoClusterBrowse( const Geo2dType * g , const BSONObj& box , BSONObj filter = BSONObj() , bool needCluster = true, double gridSize  = 5 ): GeoBoxBrowse( g , box , filter ), _needCluster(needCluster), _gridSize( gridSize ) {
+		Point minPro = point_to_projection(_want._min);
+		Point maxPro = point_to_projection(_want._max);
+		_extendDisance = min(maxPro._x - minPro._x, minPro._y - maxPro._y);
+		//log() << "dis:" << _extendDisance << " min:" << projection_to_point(minPro) << " max:" << projection_to_point(maxPro) << endl;
+		_extendDisance = _extendDisance / gridSize;
 	}
 	Box box() {
 		return _want;
         }
-	//map<int, ClusterBox> clusters{
-	//	return _clusters;
-	//}
         void curToCluster() {
 		// Do exact check
 		vector< BSONObj > locs;
@@ -2547,20 +2601,37 @@ namespace mongo {
                 for( vector< BSONObj >::iterator i = locs.begin(); i != locs.end(); ++i ) {
 			Point poi( *i );
 			if( _want.inside( poi ) ) {
-				int x = (poi._x - _want._min._x)/_px;
-				int y = (poi._y - _want._min._y)/_py;
-				if (x > (_lenx - 1)) x = _lenx - 1;
-				if (y > (_leny - 1)) y = _leny - 1;
-				//log() << "Found point: " << poi << " grid: " << (x*y+y) << endl;
-				_clusters[_lenx*y+x].addPoint(poi, current());
+				if( _needCluster ) {
+					bool used = false;
+					ClusterBox box;
+					for ( vector< ClusterBox >::iterator j = _clusters.begin(); j != _clusters.end(); j++ ) { 
+						box = *j;
+						if(box.inside(poi)){
+							used = true;
+							//log() << "box: " << box.center() << " count:" << box.count << endl;
+							box.addPoint(poi, GeoMarker(poi, current()));
+							//log() << "add point: " << poi << " center: " << box.center() << " count:" << box.count << endl;
+							*j = box;
+							break;
+						}
+					}
+					if (!used) {
+						box = ClusterBox(poi, poi, _extendDisance);
+						box.addPoint(poi, GeoMarker(poi, current()));
+						//log() << "add box point: " << poi << " min:" << box._min << " max:" << box._max << endl;
+						_clusters.push_back(box);
+					}
+				} else {
+					_markers.push_back(GeoMarker(poi, current()));
+				}
 			}
-                }
+		}
         }
-	double _px;
-	double _py;
-	int _lenx;
-	int _leny;
-        map<int, ClusterBox> _clusters;
+	bool _needCluster;
+	double _gridSize;
+	double _extendDisance;
+        vector< ClusterBox > _clusters;
+        vector< GeoMarker > _markers;
     };
     /**
      * 	box: [[],[]]
@@ -2616,25 +2687,49 @@ namespace mongo {
 	    if ( cmdObj["query"].type() == Object )
                 filter = cmdObj["query"].embeddedObject();
 
-            //shared_ptr<Cursor> cursor( new GeoClusterBrowse( g , cmdObj["box"].embeddedObjectUserCheck() , filter ) );
-            scoped_ptr<GeoClusterBrowse> cursor (new GeoClusterBrowse( g , cmdObj["box"].embeddedObjectUserCheck() , filter ));
+	    bool needCluster = true;
+	    if ( cmdObj["disableCluster"].trueValue() )
+		    needCluster = false;
+            double gridSize = 5;
+            if ( cmdObj["gridSize"].isNumber() )
+                gridSize = cmdObj["gridSize"].numberDouble();
 
-            //BSONObjBuilder arr( result.subarrayStart( "results" ) );
-            BSONArrayBuilder arr( result.subarrayStart( "results" ) );
-	    BSONObj current;
+
+            //shared_ptr<Cursor> cursor( new GeoClusterBrowse( g , cmdObj["box"].embeddedObjectUserCheck() , filter ) );
+            scoped_ptr<GeoClusterBrowse> cursor (new GeoClusterBrowse( g , cmdObj["box"].embeddedObjectUserCheck() , filter , needCluster, gridSize ));
+
 	    //log() << "isNew " << newDoc << endl;
             while ( cursor->ok() ) {
-		    current = cursor->current();
 		    cursor->curToCluster();
 		    cursor->advance();
 		    //RARELY killCurrentOp.checkForInterrupt();
 	    }
-	    map<int, ClusterBox> clusters = cursor->_clusters;
-	    for ( map<int, ClusterBox>::iterator i = clusters.begin(); i != clusters.end(); i++ ) { 
-		    ClusterBox box = i->second;
-		    if(box.count > 0){
-			    arr.append(box.obj());
+	    vector< ClusterBox > clusters = cursor->_clusters;
+	    vector< GeoMarker > markers = cursor->_markers;
+            BSONArrayBuilder clusterarr( result.subarrayStart( "clusters" ) );
+	    ClusterBox box;
+	    for ( vector< ClusterBox >::iterator i = clusters.begin(); i != clusters.end(); i++ ) { 
+	            box = *i;
+		    if(box.count == 1){
+			    markers.push_back(box._marker);
+		    }else if( box.count > 0 ){
+			    clusterarr.append(box.obj());
 		    }
+	    }
+	    clusterarr.done();
+            //BSONObjBuilder arr( result.subarrayStart( "results" ) );
+            BSONArrayBuilder arr( result.subarrayStart( "markers" ) );
+	    GeoMarker marker;
+            int x = 0;
+	    for ( vector< GeoMarker >::iterator i = markers.begin(); i != markers.end(); i++ ) { 
+		    marker = *i;
+		    BSONObjBuilder bb( arr.subobjStart( BSONObjBuilder::numStr( x++ ) ) );
+		    BSONArrayBuilder pp( bb.subarrayStart( "point" ) );
+		    pp.append(marker._poi._x);
+		    pp.append(marker._poi._y);
+		    pp.done();
+		    bb.append( "obj" , marker._obj );
+		    bb.done();
 	    }
             arr.done();
 
@@ -2651,6 +2746,5 @@ namespace mongo {
         }
 
     } geo2dClusterCmd;
-
 
 }
