@@ -2603,20 +2603,18 @@ namespace mongo {
 			if( _want.inside( poi ) ) {
 				if( _needCluster ) {
 					bool used = false;
-					ClusterBox box;
 					for ( vector< ClusterBox >::iterator j = _clusters.begin(); j != _clusters.end(); j++ ) { 
-						box = *j;
+						ClusterBox& box = *j;
 						if(box.inside(poi)){
 							used = true;
 							//log() << "box: " << box.center() << " count:" << box.count << endl;
 							box.addPoint(poi, GeoMarker(poi, current()));
 							//log() << "add point: " << poi << " center: " << box.center() << " count:" << box.count << endl;
-							*j = box;
 							break;
 						}
 					}
 					if (!used) {
-						box = ClusterBox(poi, poi, _extendDisance);
+						ClusterBox box(poi, poi, _extendDisance);
 						box.addPoint(poi, GeoMarker(poi, current()));
 						//log() << "add box point: " << poi << " min:" << box._min << " max:" << box._max << endl;
 						_clusters.push_back(box);
