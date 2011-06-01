@@ -52,7 +52,8 @@ namespace mongo {
     { }
 
     // largest key size we allow.  note we very much need to support bigger keys (somehow) in the future.
-    static const int KeyMax = BucketSize / 10;
+    //static const int KeyMax = BucketSize / 10;
+    static const int KeyMax = 2048;
 
     // We define this value as the maximum number of bytes such that, if we have
     // fewer than this many bytes, we must be able to either merge with or receive
